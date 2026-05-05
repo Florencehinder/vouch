@@ -1,0 +1,38 @@
+{
+  "name": "vouch",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "sync": "tsx --env-file=.env.local scripts/run-sync.ts",
+    "discover": "tsx --env-file=.env.local scripts/run-discover.ts",
+    "evaluate": "tsx --env-file=.env.local scripts/run-evaluate.ts",
+    "classify": "tsx --env-file=.env.local scripts/run-classify.ts",
+    "classify:test": "tsx --env-file=.env.local scripts/classify-test.ts",
+    "digest": "tsx --env-file=.env.local scripts/run-digest.ts",
+    "probe:ats": "tsx --env-file=.env.local scripts/probe-ats.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.92.0",
+    "@supabase/supabase-js": "^2.105.0",
+    "googleapis": "^171.4.0",
+    "next": "16.2.4",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "resend": "^6.12.2"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.2.4",
+    "tailwindcss": "^4",
+    "tsx": "^4.21.0",
+    "typescript": "^5"
+  }
+}
