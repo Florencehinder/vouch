@@ -1,4 +1,11 @@
 import "../lib/env";
+
+// Temporary debug: confirm env vars made it through to the runner
+const u = process.env.SUPABASE_URL;
+console.log(
+  `SUPABASE_URL: present=${!!u} len=${u?.length ?? 0} startsWithHttps=${u?.startsWith("https://") ?? false} hasNewline=${u?.includes("\n") ?? false} hasCR=${u?.includes("\r") ?? false} firstChar=${u?.charCodeAt(0)} lastChar=${u?.charCodeAt((u?.length ?? 1) - 1)}`,
+);
+
 import { runSync } from "../lib/sync";
 import { runEvaluate } from "../lib/evaluate-runner";
 import { runDiscover } from "../lib/discover";
