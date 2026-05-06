@@ -14,3 +14,9 @@ if (existsSync(path)) {
     if (!process.env[key]) process.env[key] = value;
   }
 }
+
+// TEMP debug
+const u = process.env.SUPABASE_URL;
+console.log(
+  `[env] SUPABASE_URL present=${!!u} len=${u?.length ?? 0} startsWithHttps=${u?.startsWith("https://") ?? false} hasNewline=${u?.includes("\n") ?? false} hasCR=${u?.includes("\r") ?? false} firstCC=${u?.charCodeAt(0)} lastCC=${u?.charCodeAt((u?.length ?? 1) - 1)}`,
+);
