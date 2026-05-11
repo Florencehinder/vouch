@@ -237,6 +237,76 @@ export async function updateJobsIsOpen(updates: Array<{ rowIndex: number; isOpen
   await updateJobRowFields(updates);
 }
 
+// === User feedback (Phase 1 of the feedback loop) ============================
+//
+// User adds two columns to the Jobs tab:
+//   K: Feedback         — '++', '+', '-', '--', or blank
+//   L: Feedback_Reason  — optional free text
+//
+// We read column A (HYPERLINK formula → URL is the join key) plus K + L, and
+// return one entry per row that has a non-blank Feedback cell.
+
+export type JobsFeedbackRow = {
+  url: string;
+  feedback: string;
+  feedback_reason: string | null;
+};
+
+const VALID_FEEDBACK = new Set(["++", "+", "-", "--"]);
+
+export async function ensureFeedbackHeaders(): Promise<{ written: boolean }> {
+  const sheets = google.sheets({ version: "v4", auth: getAuth(true) });
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: process.env.GOOGLE_SHEETS_ID!,
+    range: "Jobs!K1:L1",
+  });
+  const current = res.data.values?.[0] ?? [];
+  const hasK = String(current[0] ?? "").trim().toLowerCase() === "feedback";
+  const hasL = String(current[1] ?? "").trim().toLowerCase() === "feedback_reason";
+  if (hasK && hasL) return { written: false };
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: process.env.GOOGLE_SHEETS_ID!,
+    range: "Jobs!K1:L1",
+    valueInputOption: "USER_ENTERED",
+    requestBody: { values: [["Feedback", "Feedback_Reason"]] },
+  });
+  return { written: true };
+}
+
+export async function readJobsFeedback(): Promise<JobsFeedbackRow[]> {
+  const sheets = google.sheets({ version: "v4", auth: getAuth() });
+  const [formulas, fbVals] = await Promise.all([
+    sheets.spreadsheets.values.get({
+      spreadsheetId: process.env.GOOGLE_SHEETS_ID!,
+      range: "Jobs!A:A",
+      valueRenderOption: "FORMULA",
+    }),
+    sheets.spreadsheets.values.get({
+      spreadsheetId: process.env.GOOGLE_SHEETS_ID!,
+      range: "Jobs!K:L",
+      valueRenderOption: "FORMATTED_VALUE",
+    }),
+  ]);
+  const aRows = formulas.data.values ?? [];
+  const klRows = fbVals.data.values ?? [];
+  const out: JobsFeedbackRow[] = [];
+  for (let i = 1; i < aRows.length; i++) {
+    const fbCell = String(klRows[i]?.[0] ?? "").trim();
+    if (!fbCell) continue;
+    if (!VALID_FEEDBACK.has(fbCell)) continue; // ignore typos like "+++", "👍"
+    const formula = String(aRows[i]?.[0] ?? "");
+    const m = formula.match(URL_FROM_HYPERLINK);
+    if (!m) continue;
+    const reasonCell = String(klRows[i]?.[1] ?? "").trim();
+    out.push({
+      url: m[1],
+      feedback: fbCell,
+      feedback_reason: reasonCell || null,
+    });
+  }
+  return out;
+}
+
 // Map between our DB field names and the user's preferred sheet column header.
 // Used to find the correct column to write to. We never write to columns whose
 // header is not in this map.

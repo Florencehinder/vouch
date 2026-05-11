@@ -2,25 +2,15 @@ import "../lib/env";
 import { google } from "googleapis";
 
 const NEW_COMPANIES: Array<[string, string]> = [
-  ["Scale AI", "https://job-boards.greenhouse.io/scaleai"],
-  ["Databricks", "https://job-boards.greenhouse.io/databricks"],
-  ["Isomorphic Labs", "https://www.isomorphiclabs.com/job-openings"],
-  ["Writer", "https://jobs.ashbyhq.com/writer"],
-  ["Hume AI", "https://job-boards.greenhouse.io/humeai"],
-  ["Poolside", "https://poolside.ai/careers"],
-  ["H Company", "https://jobs.ashbyhq.com/hcompany"],
-  ["Dust", "https://jobs.ashbyhq.com/dust"],
-  ["Owkin", "https://www.owkin.com/careers"],
-  ["Causaly", "https://www.causaly.com/careers"],
-  ["Tessl", "https://jobs.ashbyhq.com/tesslcareers"],
-  ["Tractable", "https://jobs.ashbyhq.com/tractable"],
-  ["Hadean", "https://hadean.com/careers"],
-  ["Multiverse", "https://www.multiverse.io/en-GB/careers"],
-  ["Behavox", "https://www.behavox.com/careers"],
-  ["MindFoundry", "https://www.mindfoundry.ai/about-us/careers"],
-  ["Stability AI", "https://stability.ai/careers"],
-  ["Cresta", "https://cresta.com/careers/"],
-  ["Notion", "https://job-boards.greenhouse.io/notion"],
+  ["Baseten", "https://jobs.ashbyhq.com/baseten"],
+  ["Fireworks AI", "https://job-boards.greenhouse.io/fireworksai"],
+  ["Anyscale", "https://jobs.ashbyhq.com/anyscale"],
+  ["Cartesia", "https://jobs.ashbyhq.com/cartesia"],
+  ["Hebbia", "https://job-boards.greenhouse.io/hebbia"],
+  ["The Browser Company", "https://jobs.ashbyhq.com/The%20Browser%20Company"],
+  ["Hex Technologies", "https://job-boards.greenhouse.io/hextechnologies"],
+  ["Factory", "https://jobs.ashbyhq.com/factory"],
+  ["Arena", "https://job-boards.greenhouse.io/arenaphysica"],
 ];
 
 async function main() {

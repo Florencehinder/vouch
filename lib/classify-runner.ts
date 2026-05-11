@@ -1,6 +1,6 @@
 import { supabaseService } from "./supabase";
 import { loadFilterConfig, applyHardExclude } from "./filter";
-import { classifyJob, CLASSIFICATION_VERSION } from "./classify";
+import { classifyJob, CLASSIFICATION_VERSION, reloadSystemPrompt } from "./classify";
 import type { StepResult } from "./sync";
 
 type JobRow = {
@@ -23,6 +23,7 @@ export type ClassifyStats = {
   haiku_errors: number;
   results_by_category: { pm: number; ds_fde: number; tpm: number; program_mgr: number; none: number };
   classification_version: string;
+  feedback_examples_used: number;
 };
 
 async function fetchUnclassified(): Promise<JobRow[]> {
@@ -73,9 +74,14 @@ export async function runClassify(): Promise<StepResult<ClassifyStats>> {
     haiku_errors: 0,
     results_by_category: { pm: 0, ds_fde: 0, tpm: 0, program_mgr: 0, none: 0 },
     classification_version: CLASSIFICATION_VERSION,
+    feedback_examples_used: 0,
   };
 
   try {
+    // Rebuild the Haiku system prompt from current feedback before any classification
+    const reload = await reloadSystemPrompt();
+    stats.feedback_examples_used = reload.examples_used;
+
     const config = await loadFilterConfig();
     const candidates = await fetchUnclassified();
     stats.candidates = candidates.length;

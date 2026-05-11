@@ -124,15 +124,13 @@ function dateForSheet(iso: string | null): string {
   return iso.slice(0, 10); // YYYY-MM-DD
 }
 
-function refereeFor(contacts: ContactRow[]): string {
-  if (!contacts.length) return "";
-  return contacts
-    .map((c) => {
-      const strength = c.relationship_strength ? ` (${c.relationship_strength})` : "";
-      return `${c.name}${strength}`;
-    })
-    .join(", ");
-}
+// User maintains a VLOOKUP-style formula in column F (Referee) that joins to the
+// Contacts tab on Company (column E). Write the same formula into every new row
+// so the lookup keeps working as the sheet grows. INDIRECT("E"&ROW()) makes the
+// formula row-position-agnostic — no need to know the target row number at
+// append time, and survives any future row re-ordering.
+const REFEREE_FORMULA =
+  '=IFNA(TEXTJOIN(", ", TRUE, FILTER(Contacts!B:B & " (" & Contacts!D:D & ")", Contacts!A:A=INDIRECT("E"&ROW()))), "")';
 
 function escapeForFormula(s: string): string {
   return s.replace(/"/g, '""');
@@ -146,7 +144,7 @@ function toJobsRow(m: MatchRow, isOpen: boolean): JobsTabRow {
     isOpen ? "TRUE" : "FALSE",                                          // C: Is_Open
     CATEGORY_LABEL[m.matched_role_category] ?? m.matched_role_category, // D: Category
     m.company.name,                                                     // E: Company
-    refereeFor(m.company.contacts),                                     // F: Referee
+    REFEREE_FORMULA,                                                    // F: Referee (formula, row-relative via INDIRECT)
     m.job.location ?? "",                                               // G: Location
     m.match_score.toFixed(2),                                           // H: Priority
     "",                                                                 // I: Comments

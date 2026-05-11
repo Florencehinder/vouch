@@ -1,9 +1,17 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { readFileSync, existsSync } from "node:fs";
+import { supabaseService } from "./supabase";
 
-export const CLASSIFICATION_VERSION = "v2";
+// Bumped from v2 → v3: now injects user feedback as few-shot examples.
+// Bumping invalidates v2 classifications so everything gets re-scored with the
+// new prompt (one-time ~$3 cost; steady-state daily runs are still cents).
+export const CLASSIFICATION_VERSION = "v3";
 
 const HAIKU_MODEL = "claude-haiku-4-5-20251001";
+
+// How many recent feedback examples to inject into the prompt. Keep small —
+// each example adds ~150 tokens and Haiku is cheap but not free.
+const MAX_FEEDBACK_EXAMPLES = 12;
 
 // Load CV at module init. cv.md is gitignored; for production deploys, set
 // env var CV_TEXT (base64-encoded) as an alternative.
@@ -14,7 +22,86 @@ const CV_TEXT = process.env.CV_TEXT
     ? readFileSync(CV_PATH, "utf8")
     : "(no CV provided — running without candidate-specific scoring)";
 
-const SYSTEM = `You are screening job postings for a specific candidate. For each posting, decide:
+// Cached prompt built lazily from current feedback. Re-built each runClassify run
+// (the runner calls reloadSystemPrompt() before classifying).
+let SYSTEM = buildSystem("");
+
+export async function reloadSystemPrompt(): Promise<{ examples_used: number }> {
+  const examples = await fetchFeedbackExamples();
+  SYSTEM = buildSystem(formatExamples(examples));
+  return { examples_used: examples.length };
+}
+
+type FeedbackExample = {
+  feedback: string;
+  feedback_reason: string | null;
+  category_at_feedback: string | null;
+  score_at_feedback: number | null;
+  reasoning_at_feedback: string | null;
+  job_title: string;
+  company_name: string;
+};
+
+async function fetchFeedbackExamples(): Promise<FeedbackExample[]> {
+  const { data, error } = await supabaseService
+    .from("job_feedback")
+    .select(
+      `feedback, feedback_reason, category_at_feedback, score_at_feedback, reasoning_at_feedback,
+       jobs!inner(title, companies!inner(name))`,
+    )
+    .order("updated_at", { ascending: false })
+    .limit(MAX_FEEDBACK_EXAMPLES);
+  if (error) {
+    // Table may not exist yet (migration pending) — degrade gracefully
+    console.warn(`[classify] feedback fetch failed (table missing?): ${error.message}`);
+    return [];
+  }
+  const out: FeedbackExample[] = [];
+  for (const row of (data ?? []) as Array<Record<string, unknown>>) {
+    const job = Array.isArray(row.jobs) ? row.jobs[0] : row.jobs;
+    if (!job) continue;
+    const co = (job as Record<string, unknown>).companies;
+    const company = Array.isArray(co) ? co[0] : co;
+    out.push({
+      feedback: String(row.feedback ?? ""),
+      feedback_reason: (row.feedback_reason as string | null) ?? null,
+      category_at_feedback: (row.category_at_feedback as string | null) ?? null,
+      score_at_feedback: (row.score_at_feedback as number | null) ?? null,
+      reasoning_at_feedback: (row.reasoning_at_feedback as string | null) ?? null,
+      job_title: String((job as { title?: unknown }).title ?? ""),
+      company_name: String((company as { name?: unknown })?.name ?? ""),
+    });
+  }
+  return out;
+}
+
+const FEEDBACK_LABEL: Record<string, string> = {
+  "++": "LOVED — calibrate UP for this shape",
+  "+": "BETTER than rated — calibrate UP",
+  "-": "LESS RELEVANT than rated — calibrate DOWN",
+  "--": "NEVER AGAIN — strong DOWN signal",
+};
+
+function formatExamples(examples: FeedbackExample[]): string {
+  if (!examples.length) return "";
+  const lines = examples.map((e) => {
+    const label = FEEDBACK_LABEL[e.feedback] ?? e.feedback;
+    const cat = e.category_at_feedback ?? "?";
+    const score = e.score_at_feedback?.toFixed(2) ?? "?";
+    const reason = e.feedback_reason ? ` (user: "${e.feedback_reason}")` : "";
+    const wasReasoning = e.reasoning_at_feedback ? ` Original reasoning: "${e.reasoning_at_feedback}"` : "";
+    return `- "${e.job_title}" @ ${e.company_name} — you classified ${cat}@${score}. User: ${label}${reason}.${wasReasoning}`;
+  });
+  return `
+
+USER FEEDBACK FROM PAST CLASSIFICATIONS (use these to calibrate this run — match the patterns the user wants more of, downweight the ones they reject):
+${lines.join("\n")}
+
+When scoring a new role, ask: does it look more like the user's ++/+ examples (score up), or their -/-- examples (score down)? Carry this into your reasoning explicitly when relevant.`;
+}
+
+function buildSystem(feedbackBlock: string): string {
+  return `You are screening job postings for a specific candidate. For each posting, decide:
 
 1. Does this role match one of the candidate's target categories?
 2. How well does it match THIS candidate's specific background?
@@ -71,9 +158,10 @@ REASONING (one sentence): MUST mention specific overlap (or specific mismatch) w
   good: "Senior PM for Claude API growth at Anthropic — leverages your RAG deployment work at 8ai.co.nz, the commercial+product role at Spark Wave, and the AI cohort facilitation at EF; right stage and London-friendly."
   good: "International Readiness Lead is mostly compliance/policy/sovereign-deployment strategy, not hands-on technical AI work — mismatches your Solutions Engineer / RAG-deployment trajectory."
   bad: "This is a PM role and you'd be a good fit." (no CV reference)
-
+${feedbackBlock}
 Reply with ONLY valid JSON, no preamble or backticks:
 {"category": "pm" | "ds_fde" | "tpm" | "program_mgr" | "none", "confidence": 0.0-1.0, "reasoning": "one sentence with specific CV reference"}`;
+}
 
 export type Classification = {
   category: "pm" | "ds_fde" | "tpm" | "program_mgr" | "none";
