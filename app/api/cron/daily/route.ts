@@ -2,7 +2,6 @@ import { NextResponse } from "next/server";
 import { runSync } from "@/lib/sync";
 import { runEvaluate } from "@/lib/evaluate-runner";
 import { runDiscover } from "@/lib/discover";
-import { runFeedback } from "@/lib/feedback-runner";
 import { runClassify } from "@/lib/classify-runner";
 import { runDigest } from "@/lib/digest";
 
@@ -27,7 +26,6 @@ export async function GET(req: Request) {
   const sync = await runSync();
   const evaluate = await runEvaluate();
   const discover = await runDiscover();
-  const feedback = await runFeedback();
   const classify = await runClassify();
   const digest = await runDigest();
 
@@ -35,7 +33,6 @@ export async function GET(req: Request) {
     sync.status === "error" ||
     evaluate.status === "error" ||
     discover.status === "error" ||
-    feedback.status === "error" ||
     classify.status === "error" ||
     digest.status === "error"
       ? "partial"
@@ -46,7 +43,6 @@ export async function GET(req: Request) {
     sync,
     evaluate,
     discover,
-    feedback,
     classify,
     digest,
   });

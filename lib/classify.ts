@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { readFileSync, existsSync } from "node:fs";
-import { supabaseService } from "./supabase";
+import { readJobsFeedback, ensureFeedbackHeaders, type JobsFeedbackRow } from "./sheets";
 
 // Bumped from v2 → v3: now injects user feedback as few-shot examples.
 // Bumping invalidates v2 classifications so everything gets re-scored with the
@@ -9,8 +9,9 @@ export const CLASSIFICATION_VERSION = "v3";
 
 const HAIKU_MODEL = "claude-haiku-4-5-20251001";
 
-// How many recent feedback examples to inject into the prompt. Keep small —
-// each example adds ~150 tokens and Haiku is cheap but not free.
+// How many recent feedback examples to inject into the prompt. Cap to keep
+// the system prompt size predictable. Examples beyond this are silently dropped
+// (most-recent-first ordering is enforced by sheet row order).
 const MAX_FEEDBACK_EXAMPLES = 12;
 
 // Load CV at module init. cv.md is gitignored; for production deploys, set
@@ -27,52 +28,21 @@ const CV_TEXT = process.env.CV_TEXT
 let SYSTEM = buildSystem("");
 
 export async function reloadSystemPrompt(): Promise<{ examples_used: number }> {
-  const examples = await fetchFeedbackExamples();
+  // Ensure K/L headers exist so user can add feedback inline; idempotent.
+  try {
+    await ensureFeedbackHeaders();
+  } catch (e) {
+    console.warn(`[classify] ensureFeedbackHeaders failed: ${e instanceof Error ? e.message : e}`);
+  }
+  const all = await readJobsFeedback().catch((e) => {
+    console.warn(`[classify] readJobsFeedback failed: ${e instanceof Error ? e.message : e}`);
+    return [] as JobsFeedbackRow[];
+  });
+  // Most-recent-first heuristic: digest appends new rows at the bottom, so
+  // reverse the sheet order to surface latest feedback first.
+  const examples = all.slice().reverse().slice(0, MAX_FEEDBACK_EXAMPLES);
   SYSTEM = buildSystem(formatExamples(examples));
   return { examples_used: examples.length };
-}
-
-type FeedbackExample = {
-  feedback: string;
-  feedback_reason: string | null;
-  category_at_feedback: string | null;
-  score_at_feedback: number | null;
-  reasoning_at_feedback: string | null;
-  job_title: string;
-  company_name: string;
-};
-
-async function fetchFeedbackExamples(): Promise<FeedbackExample[]> {
-  const { data, error } = await supabaseService
-    .from("job_feedback")
-    .select(
-      `feedback, feedback_reason, category_at_feedback, score_at_feedback, reasoning_at_feedback,
-       jobs!inner(title, companies!inner(name))`,
-    )
-    .order("updated_at", { ascending: false })
-    .limit(MAX_FEEDBACK_EXAMPLES);
-  if (error) {
-    // Table may not exist yet (migration pending) — degrade gracefully
-    console.warn(`[classify] feedback fetch failed (table missing?): ${error.message}`);
-    return [];
-  }
-  const out: FeedbackExample[] = [];
-  for (const row of (data ?? []) as Array<Record<string, unknown>>) {
-    const job = Array.isArray(row.jobs) ? row.jobs[0] : row.jobs;
-    if (!job) continue;
-    const co = (job as Record<string, unknown>).companies;
-    const company = Array.isArray(co) ? co[0] : co;
-    out.push({
-      feedback: String(row.feedback ?? ""),
-      feedback_reason: (row.feedback_reason as string | null) ?? null,
-      category_at_feedback: (row.category_at_feedback as string | null) ?? null,
-      score_at_feedback: (row.score_at_feedback as number | null) ?? null,
-      reasoning_at_feedback: (row.reasoning_at_feedback as string | null) ?? null,
-      job_title: String((job as { title?: unknown }).title ?? ""),
-      company_name: String((company as { name?: unknown })?.name ?? ""),
-    });
-  }
-  return out;
 }
 
 const FEEDBACK_LABEL: Record<string, string> = {
@@ -82,15 +52,14 @@ const FEEDBACK_LABEL: Record<string, string> = {
   "--": "NEVER AGAIN — strong DOWN signal",
 };
 
-function formatExamples(examples: FeedbackExample[]): string {
+function formatExamples(examples: JobsFeedbackRow[]): string {
   if (!examples.length) return "";
   const lines = examples.map((e) => {
     const label = FEEDBACK_LABEL[e.feedback] ?? e.feedback;
-    const cat = e.category_at_feedback ?? "?";
-    const score = e.score_at_feedback?.toFixed(2) ?? "?";
+    const cat = e.category ?? "?";
+    const score = e.score?.toFixed(2) ?? "?";
     const reason = e.feedback_reason ? ` (user: "${e.feedback_reason}")` : "";
-    const wasReasoning = e.reasoning_at_feedback ? ` Original reasoning: "${e.reasoning_at_feedback}"` : "";
-    return `- "${e.job_title}" @ ${e.company_name} — you classified ${cat}@${score}. User: ${label}${reason}.${wasReasoning}`;
+    return `- "${e.title}" @ ${e.company} — current classification ${cat}@${score}. User feedback: ${label}${reason}.`;
   });
   return `
 

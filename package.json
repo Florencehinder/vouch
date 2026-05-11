@@ -12,7 +12,6 @@
     "evaluate": "tsx --env-file=.env.local scripts/run-evaluate.ts",
     "classify": "tsx --env-file=.env.local scripts/run-classify.ts",
     "classify:test": "tsx --env-file=.env.local scripts/classify-test.ts",
-    "feedback": "tsx --env-file=.env.local scripts/run-feedback.ts",
     "digest": "tsx --env-file=.env.local scripts/run-digest.ts",
     "probe:ats": "tsx --env-file=.env.local scripts/probe-ats.ts"
   },

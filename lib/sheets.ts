@@ -237,22 +237,29 @@ export async function updateJobsIsOpen(updates: Array<{ rowIndex: number; isOpen
   await updateJobRowFields(updates);
 }
 
-// === User feedback (Phase 1 of the feedback loop) ============================
+// === User feedback (sheet-only feedback loop) =================================
 //
 // User adds two columns to the Jobs tab:
 //   K: Feedback         — '++', '+', '-', '--', or blank
 //   L: Feedback_Reason  — optional free text
 //
-// We read column A (HYPERLINK formula → URL is the join key) plus K + L, and
-// return one entry per row that has a non-blank Feedback cell.
+// We read column A (HYPERLINK formula → URL + title) plus D (Category), E
+// (Company), H (Priority/score), K (Feedback), L (Feedback_Reason), and return
+// one entry per row that has a valid non-blank Feedback cell. Used by
+// classify.ts to inject few-shot calibration examples into Haiku's prompt.
 
 export type JobsFeedbackRow = {
   url: string;
+  title: string;
+  company: string;
+  category: string | null;
+  score: number | null;
   feedback: string;
   feedback_reason: string | null;
 };
 
 const VALID_FEEDBACK = new Set(["++", "+", "-", "--"]);
+const TITLE_FROM_HYPERLINK = /^=HYPERLINK\("[^"]*",\s*"([^"]+)"/i;
 
 export async function ensureFeedbackHeaders(): Promise<{ written: boolean }> {
   const sheets = google.sheets({ version: "v4", auth: getAuth(true) });
@@ -275,11 +282,17 @@ export async function ensureFeedbackHeaders(): Promise<{ written: boolean }> {
 
 export async function readJobsFeedback(): Promise<JobsFeedbackRow[]> {
   const sheets = google.sheets({ version: "v4", auth: getAuth() });
-  const [formulas, fbVals] = await Promise.all([
+  // Column A as FORMULA (need title from HYPERLINK); D/E/H/K/L as displayed values
+  const [formulas, mainCols, fbCols] = await Promise.all([
     sheets.spreadsheets.values.get({
       spreadsheetId: process.env.GOOGLE_SHEETS_ID!,
       range: "Jobs!A:A",
       valueRenderOption: "FORMULA",
+    }),
+    sheets.spreadsheets.values.get({
+      spreadsheetId: process.env.GOOGLE_SHEETS_ID!,
+      range: "Jobs!D:H",
+      valueRenderOption: "FORMATTED_VALUE",
     }),
     sheets.spreadsheets.values.get({
       spreadsheetId: process.env.GOOGLE_SHEETS_ID!,
@@ -288,18 +301,29 @@ export async function readJobsFeedback(): Promise<JobsFeedbackRow[]> {
     }),
   ]);
   const aRows = formulas.data.values ?? [];
-  const klRows = fbVals.data.values ?? [];
+  const dhRows = mainCols.data.values ?? []; // [D, E, F, G, H]
+  const klRows = fbCols.data.values ?? [];
   const out: JobsFeedbackRow[] = [];
   for (let i = 1; i < aRows.length; i++) {
     const fbCell = String(klRows[i]?.[0] ?? "").trim();
     if (!fbCell) continue;
     if (!VALID_FEEDBACK.has(fbCell)) continue; // ignore typos like "+++", "👍"
     const formula = String(aRows[i]?.[0] ?? "");
-    const m = formula.match(URL_FROM_HYPERLINK);
-    if (!m) continue;
+    const urlM = formula.match(URL_FROM_HYPERLINK);
+    if (!urlM) continue;
+    const titleM = formula.match(TITLE_FROM_HYPERLINK);
+    const dh = dhRows[i] ?? [];
+    const category = String(dh[0] ?? "").trim() || null; // D
+    const company = String(dh[1] ?? "").trim();          // E
+    const priorityCell = String(dh[4] ?? "").trim();     // H
+    const score = priorityCell ? Number(priorityCell) : null;
     const reasonCell = String(klRows[i]?.[1] ?? "").trim();
     out.push({
-      url: m[1],
+      url: urlM[1],
+      title: titleM ? titleM[1] : "(unknown title)",
+      company,
+      category,
+      score: Number.isFinite(score) ? score : null,
       feedback: fbCell,
       feedback_reason: reasonCell || null,
     });
