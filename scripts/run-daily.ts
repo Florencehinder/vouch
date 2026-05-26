@@ -5,23 +5,28 @@ import { runDiscover } from "../lib/discover";
 import { runClassify } from "../lib/classify-runner";
 import { runDigest } from "../lib/digest";
 
+function log(r: { kind: string; status: string; stats: unknown; error?: string }) {
+  console.log(`${r.kind} ${r.status}:`, r.stats);
+  if (r.error) console.error(`  ${r.kind} ERROR: ${r.error}`);
+}
+
 async function main() {
   const sync = await runSync();
-  console.log(`sheet_sync ${sync.status}:`, sync.stats);
+  log(sync);
 
   const evaluate = await runEvaluate();
-  console.log(`company_evaluate ${evaluate.status}:`, evaluate.stats);
+  log(evaluate);
 
   const discover = await runDiscover();
-  console.log(`job_discover ${discover.status}:`, discover.stats);
+  log(discover);
 
   // classify-runner reads user feedback from the Jobs sheet directly at the
   // start of each run (see reloadSystemPrompt in lib/classify.ts).
   const classify = await runClassify();
-  console.log(`job_classify ${classify.status}:`, classify.stats);
+  log(classify);
 
   const digest = await runDigest();
-  console.log(`digest_email ${digest.status}:`, digest.stats);
+  log(digest);
 
   const anyError = [sync, evaluate, discover, classify, digest].some(
     (r) => r.status === "error",

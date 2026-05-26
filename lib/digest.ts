@@ -222,12 +222,30 @@ async function refreshSyncedRowsInSheet(): Promise<{ is_open: number; category: 
   if (snapshot.length === 0) return { is_open: 0, category: 0, priority: 0 };
   const urls = snapshot.map((r) => r.url);
 
-  // Pull current is_open + match category/score per URL via a join through jobs → job_matches
+  // Pull current is_open + match category/score per URL via a join through jobs → job_matches.
+  // Chunk by cumulative ENCODED length, not a fixed count: a PostgREST `.in("url", [...])`
+  // filter is sent in the request URL, and undici caps total headers at ~16KB. Long ATS
+  // URLs (Greenhouse/Ashby ~80-120 chars, ~2-3x when percent-encoded) mean a fixed count
+  // of 200 overflows once the sheet grows past ~200 rows. Budget the in-clause to ~8KB.
   type DbState = { is_open: boolean; category: string | null; score: number | null };
   const dbState = new Map<string, DbState>();
-  const chunkSize = 200;
-  for (let i = 0; i < urls.length; i += chunkSize) {
-    const chunk = urls.slice(i, i + chunkSize);
+  const IN_CLAUSE_BUDGET = 8000;
+  const chunks: string[][] = [];
+  let current: string[] = [];
+  let currentLen = 0;
+  for (const url of urls) {
+    const encodedLen = encodeURIComponent(url).length + 3; // quotes + comma separator
+    if (current.length && currentLen + encodedLen > IN_CLAUSE_BUDGET) {
+      chunks.push(current);
+      current = [];
+      currentLen = 0;
+    }
+    current.push(url);
+    currentLen += encodedLen;
+  }
+  if (current.length) chunks.push(current);
+
+  for (const chunk of chunks) {
     const { data, error } = await supabaseService
       .from("jobs")
       .select("url, is_open, job_matches(matched_role_category, match_score)")
@@ -390,7 +408,12 @@ export async function runDigest(): Promise<StepResult<DigestStats>> {
     });
     return { kind: "digest_email", status: "ok", stats, duration_ms: Date.now() - t0 };
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message =
+      err instanceof Error
+        ? err.message
+        : typeof err === "object" && err !== null && "message" in err
+          ? String((err as { message: unknown }).message)
+          : JSON.stringify(err);
     await supabaseService.from("runs").insert({
       kind: "digest_email",
       started_at: startedAt,
