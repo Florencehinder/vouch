@@ -132,30 +132,136 @@ export async function readLocations(): Promise<LocationRow[]> {
     }));
 }
 
-// Order matches the user's headers in the Jobs tab:
-// Job Title | Date Listed | Is_Open | Category | Company | Referee | Location | Priority | Comments | Status
-export type JobsTabRow = [
-  string, // A: Job Title (HYPERLINK formula)
-  string, // B: Date Listed
-  string, // C: Is_Open ("TRUE" / "FALSE")
-  string, // D: Category
-  string, // E: Company
-  string, // F: Referee
-  string, // G: Location
-  string, // H: Priority
-  string, // I: Comments
-  string, // J: Status
+// === Jobs tab: header-driven column resolution ==============================
+//
+// The Jobs tab is the user's working surface — they reorder columns, insert
+// new ones (e.g. "Days Listed"), and rename. We therefore NEVER address columns
+// by fixed letter. Every read/write resolves the live header row first and maps
+// each canonical field to whatever column currently carries that header. The
+// header text is the single point of truth.
+
+export type JobsField =
+  | "title"
+  | "date"
+  | "days_listed"
+  | "is_open"
+  | "category"
+  | "company"
+  | "referee"
+  | "location"
+  | "priority"
+  | "comments"
+  | "status"
+  | "feedback"
+  | "feedback_reason";
+
+// Matched against the normalized (trim + lowercase) header text. First matching
+// column wins, so duplicate headers don't double-map. `priority`/`status` match
+// by prefix because the user keeps descriptive suffixes
+// ("Priority (CV & Career goal match)", "Status (Applied | Interested | Passed)").
+const JOBS_FIELD_MATCHERS: Array<{ field: JobsField; match: (h: string) => boolean }> = [
+  { field: "title", match: (h) => h === "job title" },
+  { field: "date", match: (h) => h === "date listed" },
+  { field: "days_listed", match: (h) => h === "days listed" },
+  { field: "is_open", match: (h) => h === "is_open" },
+  { field: "category", match: (h) => h === "category" },
+  { field: "company", match: (h) => h === "company" },
+  { field: "referee", match: (h) => h === "referee" },
+  { field: "location", match: (h) => h === "location" },
+  { field: "priority", match: (h) => h.startsWith("priority") },
+  { field: "comments", match: (h) => h === "comments" },
+  { field: "status", match: (h) => h.startsWith("status") },
+  { field: "feedback", match: (h) => h === "feedback" },
+  { field: "feedback_reason", match: (h) => h === "feedback_reason" },
 ];
 
-export async function appendJobsRows(rows: JobsTabRow[]): Promise<void> {
+type SheetsClient = ReturnType<typeof google.sheets>;
+
+export type JobsColumns = {
+  /** 0-based column index per resolved field. */
+  index: Partial<Record<JobsField, number>>;
+  /** Number of header cells in row 1 (defines the write width). */
+  width: number;
+};
+
+async function resolveJobsColumns(sheets: SheetsClient): Promise<JobsColumns> {
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: process.env.GOOGLE_SHEETS_ID!,
+    range: "Jobs!1:1",
+  });
+  const headers = (res.data.values?.[0] ?? []).map((h) => String(h).trim().toLowerCase());
+  const index: Partial<Record<JobsField, number>> = {};
+  headers.forEach((h, i) => {
+    for (const m of JOBS_FIELD_MATCHERS) {
+      if (index[m.field] === undefined && m.match(h)) {
+        index[m.field] = i;
+        break;
+      }
+    }
+  });
+  return { index, width: Math.max(headers.length, 1) };
+}
+
+// Build the row-relative Referee formula referencing whatever column holds Company.
+function refereeFormula(cols: JobsColumns): string | null {
+  const companyIdx = cols.index.company;
+  if (companyIdx === undefined) return null;
+  const c = colLetter(companyIdx);
+  return `=IFNA(TEXTJOIN(", ", TRUE, FILTER(Contacts!B:B & " (" & Contacts!D:D & ")", Contacts!A:A=INDIRECT("${c}"&ROW()))), "")`;
+}
+
+// Build the row-relative Days-Listed formula referencing whatever column holds Date Listed.
+function daysListedFormula(cols: JobsColumns): string | null {
+  const dateIdx = cols.index.date;
+  if (dateIdx === undefined) return null;
+  const d = colLetter(dateIdx);
+  return `=IF(INDIRECT("${d}"&ROW())="","",TODAY()-INDIRECT("${d}"&ROW()))`;
+}
+
+// Structured values for one Jobs row. The caller supplies data fields; this
+// module injects the Referee + Days Listed formulas into their resolved columns.
+export type JobsRowValues = {
+  title: string; // HYPERLINK formula
+  date: string;
+  is_open: string; // "TRUE" / "FALSE"
+  category: string;
+  company: string;
+  location: string;
+  priority: string;
+};
+
+export async function appendJobsRows(rows: JobsRowValues[]): Promise<void> {
   if (!rows.length) return;
   const sheets = google.sheets({ version: "v4", auth: getAuth(true) });
+  const cols = await resolveJobsColumns(sheets);
+  const referee = refereeFormula(cols);
+  const daysListed = daysListedFormula(cols);
+
+  const values = rows.map((r) => {
+    const arr: string[] = new Array(cols.width).fill("");
+    const put = (field: JobsField, value: string | null) => {
+      const i = cols.index[field];
+      if (i !== undefined && value !== null) arr[i] = value;
+    };
+    put("title", r.title);
+    put("date", r.date);
+    put("days_listed", daysListed);
+    put("is_open", r.is_open);
+    put("category", r.category);
+    put("company", r.company);
+    put("referee", referee);
+    put("location", r.location);
+    put("priority", r.priority);
+    return arr;
+  });
+
+  const lastCol = colLetter(cols.width - 1);
   await sheets.spreadsheets.values.append({
     spreadsheetId: process.env.GOOGLE_SHEETS_ID!,
-    range: "Jobs!A:J",
+    range: `Jobs!A:${lastCol}`,
     valueInputOption: "USER_ENTERED",
     insertDataOption: "INSERT_ROWS",
-    requestBody: { values: rows },
+    requestBody: { values },
   });
 }
 
@@ -171,33 +277,32 @@ export type JobsTabSnapshot = Array<{
 
 export async function readJobsTabSnapshot(): Promise<JobsTabSnapshot> {
   const sheets = google.sheets({ version: "v4", auth: getAuth(true) });
-  // Column A as FORMULA so we can extract URL from HYPERLINK; columns C–H as values for Is_Open / Category / Priority.
-  const [formulas, values] = await Promise.all([
-    sheets.spreadsheets.values.get({
-      spreadsheetId: process.env.GOOGLE_SHEETS_ID!,
-      range: "Jobs!A:A",
-      valueRenderOption: "FORMULA",
-    }),
-    sheets.spreadsheets.values.get({
-      spreadsheetId: process.env.GOOGLE_SHEETS_ID!,
-      range: "Jobs!C:H",
-      valueRenderOption: "FORMATTED_VALUE",
-    }),
-  ]);
+  const cols = await resolveJobsColumns(sheets);
+  // Whole grid as FORMULA so column A's HYPERLINK survives; everything else
+  // reads fine as its formula/value too. Resolve fields by header position.
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: process.env.GOOGLE_SHEETS_ID!,
+    range: `Jobs!A:${colLetter(cols.width - 1)}`,
+    valueRenderOption: "FORMULA",
+  });
+  const rows = res.data.values ?? [];
+  const titleIdx = cols.index.title ?? 0;
+  const at = (row: unknown[], field: JobsField): string => {
+    const i = cols.index[field];
+    return i === undefined ? "" : String(row[i] ?? "").trim();
+  };
   const out: JobsTabSnapshot = [];
-  const aRows = formulas.data.values ?? [];
-  const colsRows = values.data.values ?? []; // index 0 = col C, 1 = D, 2 = E, 3 = F, 4 = G, 5 = H
-  for (let i = 1; i < aRows.length; i++) {
-    const formula = String(aRows[i]?.[0] ?? "");
+  for (let i = 1; i < rows.length; i++) {
+    const row = rows[i] ?? [];
+    const formula = String(row[titleIdx] ?? "");
     const m = formula.match(URL_FROM_HYPERLINK);
     if (!m) continue;
-    const cells = colsRows[i] ?? [];
     out.push({
       rowIndex: i + 1,
       url: m[1],
-      isOpen: String(cells[0] ?? "").trim(),
-      category: String(cells[1] ?? "").trim(),
-      priority: String(cells[5] ?? "").trim(),
+      isOpen: at(row, "is_open"),
+      category: at(row, "category"),
+      priority: at(row, "priority"),
     });
   }
   return out;
@@ -213,16 +318,20 @@ export type JobRowFieldUpdate = {
 export async function updateJobRowFields(updates: JobRowFieldUpdate[]): Promise<void> {
   if (!updates.length) return;
   const sheets = google.sheets({ version: "v4", auth: getAuth(true) });
+  const cols = await resolveJobsColumns(sheets);
+  const isOpenCol = cols.index.is_open;
+  const categoryCol = cols.index.category;
+  const priorityCol = cols.index.priority;
   const data: Array<{ range: string; values: (string | number)[][] }> = [];
   for (const u of updates) {
-    if (u.isOpen !== undefined) {
-      data.push({ range: `Jobs!C${u.rowIndex}`, values: [[u.isOpen ? "TRUE" : "FALSE"]] });
+    if (u.isOpen !== undefined && isOpenCol !== undefined) {
+      data.push({ range: `Jobs!${colLetter(isOpenCol)}${u.rowIndex}`, values: [[u.isOpen ? "TRUE" : "FALSE"]] });
     }
-    if (u.category !== undefined) {
-      data.push({ range: `Jobs!D${u.rowIndex}`, values: [[u.category]] });
+    if (u.category !== undefined && categoryCol !== undefined) {
+      data.push({ range: `Jobs!${colLetter(categoryCol)}${u.rowIndex}`, values: [[u.category]] });
     }
-    if (u.priority !== undefined) {
-      data.push({ range: `Jobs!H${u.rowIndex}`, values: [[u.priority]] });
+    if (u.priority !== undefined && priorityCol !== undefined) {
+      data.push({ range: `Jobs!${colLetter(priorityCol)}${u.rowIndex}`, values: [[u.priority]] });
     }
   }
   if (!data.length) return;
@@ -239,14 +348,11 @@ export async function updateJobsIsOpen(updates: Array<{ rowIndex: number; isOpen
 
 // === User feedback (sheet-only feedback loop) =================================
 //
-// User adds two columns to the Jobs tab:
-//   K: Feedback         — '++', '+', '-', '--', or blank
-//   L: Feedback_Reason  — optional free text
-//
-// We read column A (HYPERLINK formula → URL + title) plus D (Category), E
-// (Company), H (Priority/score), K (Feedback), L (Feedback_Reason), and return
-// one entry per row that has a valid non-blank Feedback cell. Used by
-// classify.ts to inject few-shot calibration examples into Haiku's prompt.
+// The user maintains a "Feedback" column ('++' | '+' | '-' | '--') and an
+// optional "Feedback_Reason" column in the Jobs tab. Both are resolved by
+// header (not fixed position). classify.ts reads these to inject few-shot
+// calibration examples into Haiku's prompt, pairing each with the row's
+// current title/company/category/priority for context.
 
 export type JobsFeedbackRow = {
   url: string;
@@ -261,71 +367,61 @@ export type JobsFeedbackRow = {
 const VALID_FEEDBACK = new Set(["++", "+", "-", "--"]);
 const TITLE_FROM_HYPERLINK = /^=HYPERLINK\("[^"]*",\s*"([^"]+)"/i;
 
+// Ensure Feedback / Feedback_Reason columns exist. If missing, append them as
+// NEW columns at the end of the header row (never overwrite existing columns by
+// fixed position — that's what previously created duplicate headers).
 export async function ensureFeedbackHeaders(): Promise<{ written: boolean }> {
   const sheets = google.sheets({ version: "v4", auth: getAuth(true) });
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: process.env.GOOGLE_SHEETS_ID!,
-    range: "Jobs!K1:L1",
-  });
-  const current = res.data.values?.[0] ?? [];
-  const hasK = String(current[0] ?? "").trim().toLowerCase() === "feedback";
-  const hasL = String(current[1] ?? "").trim().toLowerCase() === "feedback_reason";
-  if (hasK && hasL) return { written: false };
+  const cols = await resolveJobsColumns(sheets);
+  const missing: string[] = [];
+  if (cols.index.feedback === undefined) missing.push("Feedback");
+  if (cols.index.feedback_reason === undefined) missing.push("Feedback_Reason");
+  if (missing.length === 0) return { written: false };
+  const startCol = colLetter(cols.width);
   await sheets.spreadsheets.values.update({
     spreadsheetId: process.env.GOOGLE_SHEETS_ID!,
-    range: "Jobs!K1:L1",
+    range: `Jobs!${startCol}1`,
     valueInputOption: "USER_ENTERED",
-    requestBody: { values: [["Feedback", "Feedback_Reason"]] },
+    requestBody: { values: [missing] },
   });
   return { written: true };
 }
 
 export async function readJobsFeedback(): Promise<JobsFeedbackRow[]> {
   const sheets = google.sheets({ version: "v4", auth: getAuth() });
-  // Column A as FORMULA (need title from HYPERLINK); D/E/H/K/L as displayed values
-  const [formulas, mainCols, fbCols] = await Promise.all([
-    sheets.spreadsheets.values.get({
-      spreadsheetId: process.env.GOOGLE_SHEETS_ID!,
-      range: "Jobs!A:A",
-      valueRenderOption: "FORMULA",
-    }),
-    sheets.spreadsheets.values.get({
-      spreadsheetId: process.env.GOOGLE_SHEETS_ID!,
-      range: "Jobs!D:H",
-      valueRenderOption: "FORMATTED_VALUE",
-    }),
-    sheets.spreadsheets.values.get({
-      spreadsheetId: process.env.GOOGLE_SHEETS_ID!,
-      range: "Jobs!K:L",
-      valueRenderOption: "FORMATTED_VALUE",
-    }),
-  ]);
-  const aRows = formulas.data.values ?? [];
-  const dhRows = mainCols.data.values ?? []; // [D, E, F, G, H]
-  const klRows = fbCols.data.values ?? [];
+  const cols = await resolveJobsColumns(sheets);
+  if (cols.index.feedback === undefined) return []; // no feedback column yet
+  // Whole grid as FORMULA so column A's HYPERLINK (URL + title) is parseable.
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: process.env.GOOGLE_SHEETS_ID!,
+    range: `Jobs!A:${colLetter(cols.width - 1)}`,
+    valueRenderOption: "FORMULA",
+  });
+  const rows = res.data.values ?? [];
+  const titleIdx = cols.index.title ?? 0;
+  const at = (row: unknown[], field: JobsField): string => {
+    const i = cols.index[field];
+    return i === undefined ? "" : String(row[i] ?? "").trim();
+  };
   const out: JobsFeedbackRow[] = [];
-  for (let i = 1; i < aRows.length; i++) {
-    const fbCell = String(klRows[i]?.[0] ?? "").trim();
-    if (!fbCell) continue;
-    if (!VALID_FEEDBACK.has(fbCell)) continue; // ignore typos like "+++", "👍"
-    const formula = String(aRows[i]?.[0] ?? "");
+  for (let i = 1; i < rows.length; i++) {
+    const row = rows[i] ?? [];
+    const fbCell = at(row, "feedback");
+    if (!fbCell || !VALID_FEEDBACK.has(fbCell)) continue; // skip blanks / typos
+    const formula = String(row[titleIdx] ?? "");
     const urlM = formula.match(URL_FROM_HYPERLINK);
     if (!urlM) continue;
     const titleM = formula.match(TITLE_FROM_HYPERLINK);
-    const dh = dhRows[i] ?? [];
-    const category = String(dh[0] ?? "").trim() || null; // D
-    const company = String(dh[1] ?? "").trim();          // E
-    const priorityCell = String(dh[4] ?? "").trim();     // H
+    const priorityCell = at(row, "priority");
     const score = priorityCell ? Number(priorityCell) : null;
-    const reasonCell = String(klRows[i]?.[1] ?? "").trim();
     out.push({
       url: urlM[1],
       title: titleM ? titleM[1] : "(unknown title)",
-      company,
-      category,
+      company: at(row, "company"),
+      category: at(row, "category") || null,
       score: Number.isFinite(score) ? score : null,
       feedback: fbCell,
-      feedback_reason: reasonCell || null,
+      feedback_reason: at(row, "feedback_reason") || null,
     });
   }
   return out;

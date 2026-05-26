@@ -1,7 +1,7 @@
 import { Resend } from "resend";
 import { supabaseService } from "./supabase";
 import { appendJobsRows, readJobsTabSnapshot, updateJobRowFields } from "./sheets";
-import type { JobsTabRow, JobRowFieldUpdate } from "./sheets";
+import type { JobsRowValues, JobRowFieldUpdate } from "./sheets";
 import type { StepResult } from "./sync";
 
 const MIN_MATCH_SCORE = 0.6;
@@ -124,32 +124,23 @@ function dateForSheet(iso: string | null): string {
   return iso.slice(0, 10); // YYYY-MM-DD
 }
 
-// User maintains a VLOOKUP-style formula in column F (Referee) that joins to the
-// Contacts tab on Company (column E). Write the same formula into every new row
-// so the lookup keeps working as the sheet grows. INDIRECT("E"&ROW()) makes the
-// formula row-position-agnostic — no need to know the target row number at
-// append time, and survives any future row re-ordering.
-const REFEREE_FORMULA =
-  '=IFNA(TEXTJOIN(", ", TRUE, FILTER(Contacts!B:B & " (" & Contacts!D:D & ")", Contacts!A:A=INDIRECT("E"&ROW()))), "")';
-
 function escapeForFormula(s: string): string {
   return s.replace(/"/g, '""');
 }
 
-function toJobsRow(m: MatchRow, isOpen: boolean): JobsTabRow {
-  const titleFormula = `=HYPERLINK("${escapeForFormula(m.job.url)}", "${escapeForFormula(m.job.title)}")`;
-  return [
-    titleFormula,                                                       // A: Job Title
-    dateForSheet(m.job.posted_at ?? m.job.first_seen_at),               // B: Date Listed
-    isOpen ? "TRUE" : "FALSE",                                          // C: Is_Open
-    CATEGORY_LABEL[m.matched_role_category] ?? m.matched_role_category, // D: Category
-    m.company.name,                                                     // E: Company
-    REFEREE_FORMULA,                                                    // F: Referee (formula, row-relative via INDIRECT)
-    m.job.location ?? "",                                               // G: Location
-    m.match_score.toFixed(2),                                           // H: Priority
-    "",                                                                 // I: Comments
-    "",                                                                 // J: Status
-  ];
+// Build the structured field→value record for one match. The Referee and
+// Days Listed formulas, and the placement of every field, are injected by
+// appendJobsRows based on the live header row — see lib/sheets.ts.
+function toJobsRow(m: MatchRow, isOpen: boolean): JobsRowValues {
+  return {
+    title: `=HYPERLINK("${escapeForFormula(m.job.url)}", "${escapeForFormula(m.job.title)}")`,
+    date: dateForSheet(m.job.posted_at ?? m.job.first_seen_at),
+    is_open: isOpen ? "TRUE" : "FALSE",
+    category: CATEGORY_LABEL[m.matched_role_category] ?? m.matched_role_category,
+    company: m.company.name,
+    location: m.job.location ?? "",
+    priority: m.match_score.toFixed(2),
+  };
 }
 
 function escapeHtml(s: string): string {
